@@ -20,9 +20,11 @@ jobs:
         run: |
           ./autogen.sh
           BDB_PREFIX="$(brew --prefix berkeley-db)"
+          BREW_PREFIX="$(brew --prefix)"
           ./configure --without-gui --with-incompatible-bdb --disable-bench \
-            CPPFLAGS="-I${BDB_PREFIX}/include" \
-            LDFLAGS="-L${BDB_PREFIX}/lib"
+            --with-boost="$(brew --prefix boost)" \
+            CPPFLAGS="-I${BDB_PREFIX}/include -I${BREW_PREFIX}/include" \
+            LDFLAGS="-L${BDB_PREFIX}/lib -L${BREW_PREFIX}/lib"
 
       - name: Dump config.log on configure failure
         if: failure()
