@@ -21,10 +21,20 @@ jobs:
           ./autogen.sh
           BDB_PREFIX="$(brew --prefix berkeley-db)"
           BREW_PREFIX="$(brew --prefix)"
-          ./configure --without-gui --with-incompatible-bdb --disable-bench \
-            --with-boost="$(brew --prefix boost)" \
-            CPPFLAGS="-I${BDB_PREFIX}/include -I${BREW_PREFIX}/include" \
-            LDFLAGS="-L${BDB_PREFIX}/lib -L${BREW_PREFIX}/lib"
+          echo "--- boost lib dir contents:"
+          ls "$(brew --prefix boost)/lib" | head -60
+          try_configure() {
+            ./configure --without-gui --with-incompatible-bdb --disable-bench \
+              --with-boost="$1" \
+              CPPFLAGS="-I${BDB_PREFIX}/include -I${BREW_PREFIX}/include" \
+              LDFLAGS="-L${BDB_PREFIX}/lib -L${BREW_PREFIX}/lib"
+          }
+          if ! try_configure "$(brew --prefix boost)"; then
+            echo "=== current boost failed; retrying with boost@1.85 ==="
+            brew install boost@1.85
+            ls "$(brew --prefix boost@1.85)/lib" | head -60
+            try_configure "$(brew --prefix boost@1.85)"
+          fi
 
       - name: Dump config.log on configure failure
         if: failure()
