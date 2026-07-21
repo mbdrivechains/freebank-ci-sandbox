@@ -13,8 +13,18 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          brew install automake libtool pkg-config boost@1.85 libevent berkeley-db gnu-tar
-          brew list --versions boost@1.85 libevent berkeley-db openssl@3 || true
+          brew install automake libtool pkg-config boost@1.85 libevent gnu-tar
+          brew list --versions boost@1.85 libevent openssl@3 || true
+
+      - name: Build static BDB 4.8 (Core-standard, from source)
+        # brew's berkeley-db ships no static archive, and 18.1 diverges from
+        # the wallet format Core's depends builds. install_db4.sh builds
+        # db-4.8.30.NC statically with the clang patch. --build overrides the
+        # 2009-era config.guess that predates Apple Silicon.
+        run: |
+          CFLAGS="-Wno-error=implicit-function-declaration" \
+            ./contrib/install_db4.sh "$PWD" --build=arm-apple-darwin
+          ls db4/lib/
 
       - name: Stage static archives
         # Portability: link brew deps STATICALLY. A directory offering only .a
@@ -25,9 +35,10 @@ jobs:
         run: |
           STATICROOT="$PWD/.staticdeps"
           mkdir -p "$STATICROOT/lib" "$STATICROOT/include"
-          for keg in boost@1.85 berkeley-db openssl@3 libevent; do
+          for keg in boost@1.85 openssl@3 libevent; do
             cp -L "$(brew --prefix $keg)"/lib/*.a "$STATICROOT/lib/" 2>/dev/null || true
           done
+          cp -L db4/lib/*.a "$STATICROOT/lib/"
           ln -s "$(brew --prefix boost@1.85)/include/boost" "$STATICROOT/include/boost"
           for lib in libboost_system libboost_filesystem libboost_program_options \
                      libboost_thread libboost_chrono libboost_unit_test_framework \
@@ -40,11 +51,10 @@ jobs:
         run: |
           ./autogen.sh
           STATICROOT="$PWD/.staticdeps"
-          BDB_PREFIX="$(brew --prefix berkeley-db)"
           BREW_PREFIX="$(brew --prefix)"
           ./configure --without-gui --with-incompatible-bdb --disable-bench \
             --with-boost="$STATICROOT" \
-            CPPFLAGS="-I${BDB_PREFIX}/include -I${BREW_PREFIX}/include" \
+            CPPFLAGS="-I$PWD/db4/include -I${BREW_PREFIX}/include" \
             LDFLAGS="-L${STATICROOT}/lib"
 
       - name: Dump config.log on configure failure
