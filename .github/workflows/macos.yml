@@ -14,24 +14,45 @@ jobs:
       - name: Install build dependencies
         run: |
           brew install automake libtool pkg-config boost@1.85 libevent berkeley-db gnu-tar
-          brew list --versions boost libevent berkeley-db openssl@3 || true
+          brew list --versions boost@1.85 libevent berkeley-db openssl@3 || true
+
+      - name: Stage static archives
+        # Portability: link brew deps STATICALLY. A directory offering only .a
+        # files (searched before any dylib dir) forces ld64 to embed the code,
+        # so the shipped binaries reference nothing outside /usr/lib and
+        # /System/Library. include/boost symlink makes this dir double as the
+        # --with-boost root, keeping brew's dylib dir out of BOOST_LDFLAGS.
+        run: |
+          STATICROOT="$PWD/.staticdeps"
+          mkdir -p "$STATICROOT/lib" "$STATICROOT/include"
+          for keg in boost@1.85 berkeley-db openssl@3 libevent; do
+            cp -L "$(brew --prefix $keg)"/lib/*.a "$STATICROOT/lib/" 2>/dev/null || true
+          done
+          ln -s "$(brew --prefix boost@1.85)/include/boost" "$STATICROOT/include/boost"
+          for lib in libboost_system libboost_filesystem libboost_program_options \
+                     libboost_thread libboost_chrono libboost_unit_test_framework \
+                     libdb_cxx libssl libcrypto libevent libevent_pthreads; do
+            ls "$STATICROOT"/lib/${lib}*.a >/dev/null 2>&1 || { echo "MISSING static archive: $lib"; ls "$STATICROOT/lib"; exit 1; }
+          done
+          ls "$STATICROOT/lib" | head -50
 
       - name: Configure
         run: |
           ./autogen.sh
+          STATICROOT="$PWD/.staticdeps"
           BDB_PREFIX="$(brew --prefix berkeley-db)"
           BREW_PREFIX="$(brew --prefix)"
           ./configure --without-gui --with-incompatible-bdb --disable-bench \
-            --with-boost="$(brew --prefix boost@1.85)" \
+            --with-boost="$STATICROOT" \
             CPPFLAGS="-I${BDB_PREFIX}/include -I${BREW_PREFIX}/include" \
-            LDFLAGS="-L${BDB_PREFIX}/lib -L${BREW_PREFIX}/lib"
+            LDFLAGS="-L${STATICROOT}/lib"
 
       - name: Dump config.log on configure failure
         if: failure()
         run: tail -150 config.log
 
       - name: Build
-        run: make -j3 -k
+        run: make -j3
 
       - name: Version smoke test
         run: |
@@ -45,17 +66,6 @@ jobs:
         if: failure()
         run: tail -200 src/test-suite.log 2>/dev/null || true
 
-      - name: Regtest boot smoke test
-        run: |
-          mkdir -p /tmp/fbsmoke
-          ./src/freebankd -regtest -daemon -datadir=/tmp/fbsmoke -rpcuser=smoke -rpcpassword=smoke
-          for i in $(seq 1 30); do
-            ./src/freebank-cli -regtest -datadir=/tmp/fbsmoke -rpcuser=smoke -rpcpassword=smoke getblockchaininfo >/dev/null 2>&1 && break
-            sleep 1
-          done
-          ./src/freebank-cli -regtest -datadir=/tmp/fbsmoke -rpcuser=smoke -rpcpassword=smoke getblockchaininfo | head -5
-          ./src/freebank-cli -regtest -datadir=/tmp/fbsmoke -rpcuser=smoke -rpcpassword=smoke stop
-
       - name: Package tarball
         run: |
           VER=$(./src/freebank-cli --version | head -1 | sed -E 's/.*v([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
@@ -67,6 +77,43 @@ jobs:
             --mtime='2026-07-20 10:00' -cf "freebank-${VER}-arm64-apple-darwin.tar" freebank
           gzip -n "freebank-${VER}-arm64-apple-darwin.tar"
           shasum -a 256 freebank-${VER}-arm64-apple-darwin.tar.gz
+
+      - name: Portability gate (no external dylib references)
+        # Runs against the PACKAGED tarball, not the build tree. Only
+        # /usr/lib and /System/Library references are acceptable — anything
+        # else (brew, /usr/local) means the artifact only runs on the builder.
+        run: |
+          mkdir -p /tmp/porttest
+          tar -xzf freebank-*-arm64-apple-darwin.tar.gz -C /tmp/porttest
+          FAIL=0
+          for b in freebankd freebank-cli freebank-tx; do
+            echo "== $b"
+            otool -L "/tmp/porttest/freebank/bin/$b"
+            BAD=$(otool -L "/tmp/porttest/freebank/bin/$b" | tail -n +2 | grep -vE '^\s+(/usr/lib/|/System/Library/)' || true)
+            if [ -n "$BAD" ]; then echo "NON-PORTABLE references in $b:"; echo "$BAD"; FAIL=1; fi
+          done
+          exit $FAIL
+
+      - name: Homebrew-free run test
+        # The exact failure mode that shipped broken in v0.2.1's first mac
+        # asset: binaries that only run where brew's kegs exist. Hide brew
+        # entirely and run the extracted artifact.
+        run: |
+          sudo mv /opt/homebrew /opt/homebrew.hidden
+          trap 'sudo mv /opt/homebrew.hidden /opt/homebrew' EXIT
+          B=/tmp/porttest/freebank/bin
+          "$B/freebankd" --version | head -2
+          "$B/freebank-cli" --version | head -1
+          "$B/freebank-tx" --help | head -1
+          mkdir -p /tmp/fbsmoke2
+          "$B/freebankd" -regtest -daemon -datadir=/tmp/fbsmoke2 -rpcuser=s -rpcpassword=s
+          for i in $(seq 1 30); do
+            "$B/freebank-cli" -regtest -datadir=/tmp/fbsmoke2 -rpcuser=s -rpcpassword=s getblockchaininfo >/dev/null 2>&1 && break
+            sleep 1
+          done
+          "$B/freebank-cli" -regtest -datadir=/tmp/fbsmoke2 -rpcuser=s -rpcpassword=s getblockchaininfo | head -3
+          "$B/freebank-cli" -regtest -datadir=/tmp/fbsmoke2 -rpcuser=s -rpcpassword=s stop
+          sleep 2
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
